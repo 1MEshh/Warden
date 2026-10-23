@@ -1,0 +1,6 @@
+# Synthetic PyPI manifest for supply-chain auditing demonstration
+--extra-index-url http://pypi-mirror.internal.invalid/simple
+reqeusts==2.31.0
+urllib4>=1.26.0
+pyyaml
+git+http://git.internal.invalid/secops/agent-utils.git@main

