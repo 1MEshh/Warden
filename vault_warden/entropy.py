@@ -44,6 +44,17 @@ TOKEN_CANDIDATE_RE = re.compile(
 UUID_V4_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+STANDARD_UUID_RE = re.compile(
+    r"^(?:urn:uuid:|\{)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$",
+    re.IGNORECASE,
+)
+CSS_HEX_COLOR_RE = re.compile(
+    r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"
+)
+REPETITIVE_HEX_RE = re.compile(
+    r"^(?:0{8,}|f{8,}|(?:00){4,}|(?:ff){4,}|(?:00000000|ffffffff)+|([0-9a-fA-F]{1,4})\1{3,})$",
+    re.IGNORECASE,
+)
 LOCKFILE_INTEGRITY_RE = re.compile(r"^sha(1|256|384|512)-[A-Za-z0-9+/=]{20,}$", re.IGNORECASE)
 
 PLACEHOLDER_SUBSTRINGS = (
@@ -60,12 +71,48 @@ PLACEHOLDER_SUBSTRINGS = (
     "todo",
     "xxxx",
     "00000000",
+    "ffffffff",
     "12345678",
     "abcdef",
     "deadbeef",
     "test_token",
     "mock_secret",
 )
+
+ALPHABET_SIZES = {
+    "hex": 16,
+    "base58": 58,
+    "base64": 64,
+    "alphanumeric": 62,
+}
+
+
+def calibrate_threshold(charset: str, token_length: int = 32) -> float:
+    """
+    Calibrate Shannon entropy threshold dynamically based on token alphabet length
+    and maximum theoretical entropy H_max = log2(|Sigma|), adjusted for finite sample length.
+    """
+    alpha_size = ALPHABET_SIZES.get(charset, 64)
+    max_entropy = math.log2(alpha_size)
+    if token_length > 1:
+        length_bound = math.log2(token_length)
+        achievable_max = min(max_entropy, length_bound)
+    else:
+        achievable_max = max_entropy
+
+    if charset == "hex":
+        ratio = 0.80
+        calibrated = round(achievable_max * ratio, 2)
+        return max(2.80, min(calibrated, HEX_ENTROPY_THRESHOLD))
+    if charset == "base58":
+        ratio = 0.725
+        calibrated = round(achievable_max * ratio, 2)
+        return max(3.80, min(calibrated, BASE58_ENTROPY_THRESHOLD))
+
+    ratio = 0.75
+    calibrated = round(achievable_max * ratio, 2)
+    return max(4.00, min(calibrated, BASE64_ENTROPY_THRESHOLD))
+
 
 
 @dataclass(frozen=True)
@@ -133,19 +180,45 @@ def mask_secret(raw: str, visible_prefix: int = 4, visible_suffix: int = 4) -> s
 def is_false_positive_token(token: str, line_context: str = "") -> bool:
     """
     Evaluate whether a candidate string is a benign identifier, lockfile hash,
-    UUID, path expression, or documentation placeholder.
+    UUID, path expression, CSS color, repetitive hex string, or documentation placeholder.
     """
-    if not token or len(token) < 20:
+    if not token:
         return True
 
-    # Ignore UUIDs
-    if UUID_V4_RE.match(token):
+    # Ignore standard UUIDs (with or without brackets/URN)
+    if STANDARD_UUID_RE.match(token) or UUID_V4_RE.match(token):
+        return True
+
+    # Ignore CSS hex color codes (#ffffff, #00ff66, #fff, etc.)
+    if CSS_HEX_COLOR_RE.match(token):
+        return True
+
+    # Ignore repetitive hex strings (00000000, ffffffff, 0000000000000000, etc.)
+    lower_token = token.lower()
+    if lower_token in ("00000000", "ffffffff"):
+        return True
+    if REPETITIVE_HEX_RE.match(token):
+        return True
+    if "00000000" in lower_token or "ffffffff" in lower_token:
+        return True
+    if all(c == "0" for c in lower_token) or all(c == "f" for c in lower_token):
+        return True
+
+    # Check CSS hex colors in line context
+    lower_line = line_context.lower()
+    if any(
+        css_prop in lower_line
+        for css_prop in ("color:", "background:", "fill:", "stroke:", "border:")
+    ):
+        if token.startswith("#") or (len(token) in (6, 8) and all(c in HEX_CHARS for c in token)):
+            return True
+
+    if len(token) < 20:
         return True
 
     # Ignore lockfile integrity hashes (sha512-..., sha256-...)
     if LOCKFILE_INTEGRITY_RE.match(token):
         return True
-    lower_line = line_context.lower()
     if '"integrity":' in lower_line or "sha512-" in lower_line or "sha256-" in lower_line:
         return True
 
@@ -164,7 +237,6 @@ def is_false_positive_token(token: str, line_context: str = "") -> bool:
         return True
 
     # Check common dummy placeholders
-    lower_token = token.lower()
     for indicator in PLACEHOLDER_SUBSTRINGS:
         if indicator in lower_token:
             return True
@@ -181,9 +253,9 @@ def evaluate_token_entropy(
     line_context: str = "",
     line_number: int = 1,
     column: int = 1,
-    hex_threshold: float = HEX_ENTROPY_THRESHOLD,
-    base58_threshold: float = BASE58_ENTROPY_THRESHOLD,
-    base64_threshold: float = BASE64_ENTROPY_THRESHOLD,
+    hex_threshold: Optional[float] = None,
+    base58_threshold: Optional[float] = None,
+    base64_threshold: Optional[float] = None,
 ) -> Optional[EntropyFinding]:
     """
     Evaluate a single token against character-set calibrated Shannon entropy thresholds.
@@ -194,17 +266,30 @@ def evaluate_token_entropy(
 
     charset = classify_charset(token)
     entropy = calculate_shannon_entropy(token)
+    token_len = len(token)
+
+    eff_hex = hex_threshold if hex_threshold is not None else calibrate_threshold("hex", token_len)
+    eff_base58 = (
+        base58_threshold
+        if base58_threshold is not None
+        else calibrate_threshold("base58", token_len)
+    )
+    eff_base64 = (
+        base64_threshold
+        if base64_threshold is not None
+        else calibrate_threshold("base64", token_len)
+    )
 
     if charset == "hex":
         # Require at least 32 hex chars (128-bit key) to avoid short commit prefixes
-        if len(token) < 32:
+        if token_len < 32:
             return None
         # Git commit SHA-1 (40 hex chars) in git metadata lines are suppressed
-        if len(token) == 40 and any(
+        if token_len == 40 and any(
             k in line_context.lower() for k in ("commit ", "parent ", "tree ", "author ", "rev ")
         ):
             return None
-        if entropy >= hex_threshold:
+        if entropy >= eff_hex:
             return EntropyFinding(
                 rule_id="VW-ENT-001",
                 cwe_id="CWE-798",
@@ -219,7 +304,7 @@ def evaluate_token_entropy(
         return None
 
     if charset == "base58":
-        if len(token) >= 24 and entropy >= base58_threshold:
+        if token_len >= 24 and entropy >= eff_base58:
             return EntropyFinding(
                 rule_id="VW-ENT-002",
                 cwe_id="CWE-798",
@@ -234,7 +319,7 @@ def evaluate_token_entropy(
         return None
 
     # Base64 or mixed alphanumeric
-    if len(token) >= 24 and entropy >= base64_threshold:
+    if token_len >= 24 and entropy >= eff_base64:
         # Ensure token has a mix of upper, lower, and digits/symbols typical of real secrets
         has_upper = any(c.isupper() for c in token)
         has_lower = any(c.islower() for c in token)

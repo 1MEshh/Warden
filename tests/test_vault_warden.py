@@ -15,15 +15,17 @@ import unittest
 from pathlib import Path
 
 from vault_warden.ast_auditor import audit_js_source, audit_python_source
-from vault_warden.cli import install_pre_commit_hook, main
+from vault_warden.cli import install_hook, install_pre_commit_hook, install_pre_push_hook, main
 from vault_warden.entropy import (
     calculate_shannon_entropy,
+    calibrate_threshold,
     classify_charset,
     evaluate_token_entropy,
     is_false_positive_token,
     mask_secret,
 )
 from vault_warden.git_forensics import parse_git_log_patch, scan_git_history, scan_working_tree
+from vault_warden.ignore import WardenIgnore
 from vault_warden.sarif import build_sarif_report, format_sarif_json
 from vault_warden.signatures import (
     SIGNATURE_CATALOG,
@@ -318,6 +320,79 @@ class TestVaultWardenIR(unittest.TestCase):
             # Running scan on empty clean repo returns exit code 0
             exit_code = main(["scan", "--path", str(repo), "--format", "json", "--fail-on", "low"])
             self.assertEqual(exit_code, 0)
+
+    def test_16_ai_and_cloud_token_signatures(self) -> None:
+        """Verify high-precision detection of modern AI model provider tokens and cloud webhooks."""
+        claude_key = "sk-ant-api03-" + ("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6" * 3)[:85]
+        openai_proj = "sk-proj-" + ("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6" * 2)[:55]
+        openai_admin = "sk-admin-" + ("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6" * 2)[:55]
+        hf_token = "hf_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        discord_url = "https://discord.com/api/webhooks/987654321098765432/abCdEfGhIjKlMnOpQrStUvWxYzA9B8C7D6E5F4G3H2I1J0_AbCdEfGhIjKlMnOpQrSt"
+        telegram_tok = "987654321:AAFlkmz89234jklsdf098234jklsdf98234"
+        gcp_sa = '{"type": "service_account", "private_key": "-----BEGIN PRIVATE KEY-----"}'
+
+        payload = "\n".join([
+            f'CLAUDE="{claude_key}"',
+            f'OPENAI_PROJ="{openai_proj}"',
+            f'OPENAI_ADMIN="{openai_admin}"',
+            f'HF_KEY="{hf_token}"',
+            f'DISCORD="{discord_url}"',
+            f'TELEGRAM="{telegram_tok}"',
+            f'GCP=\'{gcp_sa}\'',
+        ])
+
+        findings = scan_text_for_secrets(payload, file_path="env.sample")
+        rule_ids = {f.rule_id for f in findings}
+        self.assertIn("VW-SIG-029", rule_ids)  # Anthropic Claude
+        self.assertIn("VW-SIG-030", rule_ids)  # OpenAI Project
+        self.assertIn("VW-SIG-031", rule_ids)  # OpenAI Admin
+        self.assertIn("VW-SIG-032", rule_ids)  # HuggingFace
+        self.assertIn("VW-SIG-033", rule_ids)  # Discord Webhook
+        self.assertIn("VW-SIG-026", rule_ids)  # Telegram Bot
+        self.assertIn("VW-SIG-034", rule_ids)  # GCP Service Account
+
+    def test_17_entropy_noise_calibration(self) -> None:
+        """Verify noise filtering heuristics ignore CSS colors, repetitive hex, and UUIDs."""
+        self.assertTrue(is_false_positive_token("0000000000000000"))
+        self.assertTrue(is_false_positive_token("ffffffffffffffff"))
+        self.assertTrue(is_false_positive_token("#00ff66"))
+        self.assertTrue(is_false_positive_token("123e4567-e89b-12d3-a456-426614174000"))
+
+        # Verify threshold calibration
+        self.assertEqual(calibrate_threshold("hex", 32), 3.2)
+        self.assertEqual(calibrate_threshold("base64", 40), 4.0)
+
+    def test_18_wardenignore(self) -> None:
+        """Verify .wardenignore path filtering and mock token whitelisting."""
+        ignore_content = "\n".join([
+            "# Comments and blank lines",
+            "tests/**",
+            "*.fixture",
+            "token:TEST_MOCK_SECRET_TOKEN_XYZ",
+        ])
+        ign = WardenIgnore.parse(ignore_content)
+        self.assertTrue(ign.is_path_ignored(Path("tests/test_file.py")))
+        self.assertTrue(ign.is_path_ignored(Path("samples/data.fixture")))
+        self.assertFalse(ign.is_path_ignored(Path("src/main.py")))
+
+        self.assertTrue(ign.is_token_ignored("TEST_MOCK_SECRET_TOKEN_XYZ"))
+        self.assertFalse(ign.is_token_ignored("REAL_SECRET_TOKEN_123"))
+
+    def test_19_install_pre_push_hook(self) -> None:
+        """Verify install-hook installs a pre-push git hook."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            (repo / ".git").mkdir()
+            hook_path = install_pre_push_hook(repo)
+            self.assertTrue(hook_path.is_file())
+            self.assertEqual(hook_path.name, "pre-push")
+            hook_text = hook_path.read_text(encoding="utf-8")
+            self.assertIn("vault_warden scan", hook_text)
+
+            # Also verify install_hook helper with hook_type argument
+            commit_hook = install_hook(repo, hook_type="pre-commit")
+            self.assertEqual(commit_hook.name, "pre-commit")
+            self.assertTrue(commit_hook.is_file())
 
 
 if __name__ == "__main__":

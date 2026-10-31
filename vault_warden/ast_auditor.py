@@ -375,21 +375,30 @@ def audit_js_source(content: str, file_path: str = "<memory>") -> List[ASTFindin
 def scan_ast_vulnerabilities(
     root_path: Path,
     exclude_tests: bool = False,
+    warden_ignore: Optional[Any] = None,
 ) -> List[ASTFinding]:
     """Scan all `.py`, `.js`, `.ts`, `.jsx`, and `.tsx` files under `root_path`."""
     findings: List[ASTFinding] = []
     base = root_path.resolve()
+    if warden_ignore is None:
+        from vault_warden.ignore import WardenIgnore
+
+        warden_ignore = WardenIgnore.load(search_dir=base if base.is_dir() else base.parent)
 
     if base.is_file():
+        if warden_ignore and warden_ignore.is_path_ignored(base.name):
+            return findings
         try:
             content = base.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return findings
         if base.suffix == ".py":
-            return audit_python_source(content, file_path=base.name)
-        if base.suffix in (".js", ".ts", ".jsx", ".tsx"):
-            return audit_js_source(content, file_path=base.name)
-        return findings
+            res = audit_python_source(content, file_path=base.name)
+        elif base.suffix in (".js", ".ts", ".jsx", ".tsx"):
+            res = audit_js_source(content, file_path=base.name)
+        else:
+            res = []
+        return warden_ignore.filter_findings(res)
 
     for file_path in sorted(base.rglob("*")):
         if not file_path.is_file():
@@ -410,8 +419,14 @@ def scan_ast_vulnerabilities(
             continue
 
         try:
-            content = file_path.read_text(encoding="utf-8", errors="replace")
             rel_path = file_path.resolve().relative_to(base).as_posix()
+        except ValueError:
+            rel_path = file_path.name
+        if warden_ignore and warden_ignore.is_path_ignored(rel_path):
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
 
@@ -420,4 +435,4 @@ def scan_ast_vulnerabilities(
         else:
             findings.extend(audit_js_source(content, file_path=rel_path))
 
-    return findings
+    return warden_ignore.filter_findings(findings)

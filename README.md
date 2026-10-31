@@ -2,7 +2,7 @@
 
 **Blue Team DevSecOps & Incident-Response Toolkit for Secret Detection, Git Object Forensics, Supply-Chain Auditing, and Static AST Analysis**
 
-`vault-warden-ir` is a zero-dependency, cross-platform security engineering and incident-response scanner written in pure Python 3.10+. It combines character-set calibrated Shannon entropy analysis, 28 deterministic credential signatures, deep Git commit-graph history forensics, Levenshtein edit-distance typosquatting detection across PyPI/NPM/Cargo manifests, lifecycle script auditing, and Python/JavaScript static AST vulnerability scanning with native OASIS SARIF v2.1.0 output.
+`vault-warden-ir` is a zero-dependency, cross-platform security engineering and incident-response scanner written in pure Python 3.10+. It combines character-set calibrated Shannon entropy analysis, 34 deterministic credential signatures, deep Git commit-graph history forensics, Levenshtein edit-distance typosquatting detection across PyPI/NPM/Cargo manifests, lifecycle script auditing, and Python/JavaScript static AST vulnerability scanning with native OASIS SARIF v2.1.0 output.
 
 ---
 
@@ -36,7 +36,8 @@ vault-warden-ir/
 │   ├── __main__.py          # Module execution entry point (python -m vault_warden)
 │   ├── cli.py               # Subcommands: scan, audit-deps, install-hook
 │   ├── entropy.py           # Calibrated Shannon entropy & secret redaction engine
-│   ├── signatures.py        # 28 credential regex rules & constant-time HMAC matching
+│   ├── signatures.py        # 34 credential regex rules & constant-time HMAC matching
+│   ├── ignore.py            # .wardenignore pattern parser and token whitelisting gate
 │   ├── git_forensics.py     # Working-tree walker & git log -p unified diff parser
 │   ├── supply_chain.py      # Levenshtein typosquatting & package.json hook auditor
 │   ├── ast_auditor.py       # Python ast.NodeVisitor & JS static sink analyzer
@@ -93,7 +94,7 @@ The implementation uses a two-row rolling buffer achieving $\mathcal{O}(m \cdot 
 
 | CWE ID | CWE Name | Module | Rule ID Range | Severity |
 | :--- | :--- | :--- | :--- | :--- |
-| **CWE-798** | Use of Hard-coded Credentials | `signatures.py`, `entropy.py`, `git_forensics.py` | `VW-SIG-001` .. `VW-SIG-028`, `VW-ENT-001` .. `VW-ENT-003` | Medium - Critical |
+| **CWE-798** | Use of Hard-coded Credentials | `signatures.py`, `entropy.py`, `git_forensics.py` | `VW-SIG-001` .. `VW-SIG-034`, `VW-ENT-001` .. `VW-ENT-003` | Medium - Critical |
 | **CWE-506** | Embedded Malicious Code (Install Hooks) | `supply_chain.py` | `VW-SC-101` .. `VW-SC-106` | High - Critical |
 | **CWE-829** | Inclusion of Functionality from Untrusted Control Sphere | `supply_chain.py` | `VW-SC-001` .. `VW-SC-003` | Low - High |
 | **CWE-94** | Improper Control of Generation of Code (`eval`/`exec`) | `ast_auditor.py` | `VW-AST-001`, `VW-AST-101` | Critical |
@@ -105,10 +106,11 @@ The implementation uses a two-row rolling buffer achieving $\mathcal{O}(m \cdot 
 
 ### 3.1 Credential Signatures & Entropy Rules (`CWE-798`)
 
-`vault_warden/signatures.py` enforces 28 deterministic signatures coupled with minimum Shannon entropy verification:
-- **Cloud Provider Credentials**: AWS Access Key IDs (`AKIA`, `ASIA`, `ABIA`, `ACCA`), AWS 40-char Secret Access Keys, Google Cloud API Keys (`AIza...`), GCP Service Account Private Key IDs, Azure Storage Shared Keys, DigitalOcean PATs (`dop_v1_...`).
+`vault_warden/signatures.py` enforces 34 deterministic signatures coupled with minimum Shannon entropy verification:
+- **Cloud Provider Credentials**: AWS Access Key IDs (`AKIA`, `ASIA`, `ABIA`, `ACCA`), AWS 40-char Secret Access Keys, Google Cloud API Keys (`AIza...`), GCP Service Account Private Key JSON blocks, Azure Storage Shared Keys, DigitalOcean PATs (`dop_v1_...`).
+- **Modern AI & LLM Tokens**: Anthropic Claude API Keys (`sk-ant-api03-...`), OpenAI Project Keys (`sk-proj-...`), OpenAI Admin Keys (`sk-admin-...`), OpenAI Standard Keys (`sk-...`), HuggingFace Access Tokens (`hf_...`).
 - **Source Control & CI/CD Tokens**: GitHub Classic PATs (`ghp_...`), GitHub Fine-Grained PATs (`github_pat_...`), GitHub OAuth/App/Refresh tokens (`gho_`, `ghu_`, `ghs_`, `ghr_`), GitLab PATs (`glpat-...`), NPM Publish Tokens (`npm_...`), PyPI Upload Tokens (`pypi-AgEIcHlwaS5vcmc...`), HashiCorp Vault Service Tokens (`hvs....`).
-- **SaaS, AI & Messaging Keys**: Stripe Live Secret/Restricted Keys (`sk_live_...`, `rk_live_...`), Slack Bot/User Tokens (`xoxb-`, `xoxp-`, `xoxa-`, `xoxr-`), Slack Incoming Webhooks, OpenAI / Anthropic API Secret Keys, SendGrid Tokens (`SG....`), Twilio Keys (`SK...`), Mailgun Keys, Discord & Telegram Bot Tokens.
+- **SaaS, Messaging & Webhook Keys**: Stripe Live Secret/Restricted Keys (`sk_live_...`, `rk_live_...`), Slack Bot/User Tokens (`xoxb-`, `xoxp-`, `xoxa-`, `xoxr-`), Slack Incoming Webhooks, Discord Webhooks & Bot Tokens, Telegram Bot Tokens, SendGrid Tokens (`SG....`), Twilio Keys (`SK...`), Mailgun Keys.
 - **Cryptographic Material & Database URIs**: RSA/OpenSSH/EC/PGP Private Key PEM headers, JWT Bearer Tokens (`eyJ...`), and PostgreSQL, MySQL, MongoDB (`mongodb+srv://`), and Redis connection URIs with embedded passwords.
 
 ### 3.2 Supply-Chain & Lifecycle Hook Auditing (`CWE-506`, `CWE-829`)
@@ -193,7 +195,8 @@ python -m vault_warden install-hook --repo .
 | `audit-deps` | `--path` | `<DIR_OR_FILE>` (Required) | Target directory or manifest file (`package.json`, `requirements.txt`, `Cargo.lock`, `pyproject.toml`). |
 | `audit-deps` | `--format` | `table` \| `json` \| `sarif` (Default: `table`) | Output serialization format. |
 | `audit-deps` | `--fail-on` | `low` \| `medium` \| `high` \| `critical` | Return exit code `1` if any supply-chain finding meets or exceeds severity. |
-| `install-hook` | `--repo` | `<GIT_REPO_DIR>` (Required) | Generates an executable `.git/hooks/pre-commit` hook inside the repository. |
+| `install-hook` | `--repo` | `<GIT_REPO_DIR>` (Required) | Generates an executable security gate inside the repository. |
+| `install-hook` | `--hook-type` | `pre-commit` \| `pre-push` (Default: `pre-push`) | Type of git hook to install. |
 
 ---
 
@@ -208,7 +211,7 @@ Running `python3 -m vault_warden scan --path <DIR> --format sarif` emits a schem
 
 ## 8. Verification & Security Audit Gate
 
-Run the full unit test suite (15 tests covering Shannon entropy math, dynamic token synthesis, redaction safety, Levenshtein typosquatting, malicious `postinstall` hooks, Python AST analysis, Git commit history scanning, and SARIF output) and the repository zero-leak gate:
+Run the full unit test suite (19 tests covering Shannon entropy math, dynamic token synthesis, redaction safety, Levenshtein typosquatting, malicious `postinstall` hooks, Python AST analysis, Git commit history scanning, AI tokens, entropy calibration, `.wardenignore`, and SARIF output) and the repository zero-leak gate:
 
 ```bash
 # Run unit test suite

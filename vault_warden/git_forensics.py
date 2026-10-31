@@ -88,9 +88,13 @@ def is_binary_file(file_path: Path) -> bool:
 def iter_scannable_files(
     root_path: Path,
     exclude_tests: bool = False,
+    warden_ignore: Optional[Any] = None,
 ) -> Iterable[Path]:
     """Yield text files under root_path safely across Windows and Linux."""
+    base = root_path.resolve()
     if root_path.is_file():
+        if warden_ignore and warden_ignore.is_path_ignored(root_path.name):
+            return
         if not is_binary_file(root_path):
             yield root_path
         return
@@ -103,11 +107,24 @@ def iter_scannable_files(
             if d not in IGNORED_DIRS
             and not d.endswith(".egg-info")
             and not (exclude_tests and d in ("tests", "test"))
+            and not (
+                warden_ignore
+                and warden_ignore.is_path_ignored(
+                    (Path(dirpath) / d).resolve().relative_to(base).as_posix() + "/"
+                )
+            )
         ]
         for filename in sorted(filenames):
             if exclude_tests and (filename.startswith("test_") or filename.endswith("_test.py")):
                 continue
             full_path = Path(dirpath) / filename
+            if warden_ignore:
+                try:
+                    rel_p = full_path.resolve().relative_to(base).as_posix()
+                except ValueError:
+                    rel_p = filename
+                if warden_ignore.is_path_ignored(rel_p):
+                    continue
             if is_binary_file(full_path):
                 continue
             try:
@@ -122,12 +139,19 @@ def scan_working_tree(
     root_path: Path,
     exclude_tests: bool = False,
     include_entropy: bool = True,
+    warden_ignore: Optional[Any] = None,
 ) -> List[SecretFinding]:
     """Scan all eligible files in the working directory for secrets."""
     findings: List[SecretFinding] = []
     base = root_path.resolve()
+    if warden_ignore is None:
+        from vault_warden.ignore import WardenIgnore
 
-    for file_path in iter_scannable_files(base, exclude_tests=exclude_tests):
+        warden_ignore = WardenIgnore.load(search_dir=base if base.is_dir() else base.parent)
+
+    for file_path in iter_scannable_files(
+        base, exclude_tests=exclude_tests, warden_ignore=warden_ignore
+    ):
         try:
             content = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -146,7 +170,7 @@ def scan_working_tree(
         )
         findings.extend(file_findings)
 
-    return findings
+    return warden_ignore.filter_findings(findings)
 
 
 def parse_git_log_patch(
@@ -207,6 +231,7 @@ def scan_git_history(
     repo_path: Path,
     max_commits: int = 50,
     include_entropy: bool = True,
+    warden_ignore: Optional[Any] = None,
 ) -> List[SecretFinding]:
     """
     Execute `git log -p -n <max_commits>` safely without a shell (`shell=False`)
@@ -216,6 +241,11 @@ def scan_git_history(
         return []
 
     target_dir = repo_path if repo_path.is_dir() else repo_path.parent
+    if warden_ignore is None:
+        from vault_warden.ignore import WardenIgnore
+
+        warden_ignore = WardenIgnore.load(search_dir=target_dir)
+
     cmd = [
         "git",
         "-C",
@@ -243,4 +273,5 @@ def scan_git_history(
     if proc.returncode != 0 or not proc.stdout:
         return []
 
-    return parse_git_log_patch(proc.stdout, include_entropy=include_entropy)
+    findings = parse_git_log_patch(proc.stdout, include_entropy=include_entropy)
+    return warden_ignore.filter_findings(findings)

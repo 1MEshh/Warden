@@ -686,10 +686,18 @@ def audit_cargo_lock(content: str, file_path: str = "Cargo.lock") -> List[Supply
     return findings
 
 
-def scan_supply_chain(root_path: Path, exclude_tests: bool = False) -> List[SupplyChainFinding]:
+def scan_supply_chain(
+    root_path: Path,
+    exclude_tests: bool = False,
+    warden_ignore: Optional[Any] = None,
+) -> List[SupplyChainFinding]:
     """Discover and audit all dependency manifests under `root_path`."""
     findings: List[SupplyChainFinding] = []
     base = root_path.resolve()
+    if warden_ignore is None:
+        from vault_warden.ignore import WardenIgnore
+
+        warden_ignore = WardenIgnore.load(search_dir=base if base.is_dir() else base.parent)
 
     manifest_names = {
         "package.json": audit_package_json,
@@ -700,11 +708,13 @@ def scan_supply_chain(root_path: Path, exclude_tests: bool = False) -> List[Supp
     }
 
     if base.is_file():
+        if warden_ignore and warden_ignore.is_path_ignored(base.name):
+            return findings
         auditor = manifest_names.get(base.name)
         if auditor is not None:
             content = base.read_text(encoding="utf-8", errors="replace")
             findings.extend(auditor(content, file_path=base.name))
-        return findings
+        return warden_ignore.filter_findings(findings)
 
     for file_path in sorted(base.rglob("*")):
         if not file_path.is_file():
@@ -717,10 +727,15 @@ def scan_supply_chain(root_path: Path, exclude_tests: bool = False) -> List[Supp
         if auditor is None:
             continue
         try:
-            content = file_path.read_text(encoding="utf-8", errors="replace")
             rel_path = file_path.resolve().relative_to(base).as_posix()
+        except ValueError:
+            rel_path = file_path.name
+        if warden_ignore and warden_ignore.is_path_ignored(rel_path):
+            continue
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         findings.extend(auditor(content, file_path=rel_path))
 
-    return findings
+    return warden_ignore.filter_findings(findings)

@@ -1,9 +1,9 @@
 """
 High-Precision Credential Signature Catalog & Combined Secret Scanner (CWE-798).
 
-Maintains 28 curated regular expression signatures covering cloud provider keys,
+Maintains 34 curated regular expression signatures covering cloud provider keys,
 VCS personal access tokens, SaaS API tokens, asymmetric private key headers,
-JWT bearer tokens, and database connection URIs with embedded credentials.
+JWT bearer tokens, AI model provider keys, and database connection URIs.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def constant_time_Token_match(candidate: str, expected: str) -> bool:
     return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
 
 
-# 28 High-Precision Credential Signatures (constructed cleanly without literal dummy keys)
+# 34 High-Precision Credential Signatures (constructed cleanly without literal dummy keys)
 SIGNATURE_CATALOG: Tuple[SignatureRule, ...] = (
     SignatureRule(
         rule_id="VW-SIG-001",
@@ -246,10 +246,10 @@ SIGNATURE_CATALOG: Tuple[SignatureRule, ...] = (
     ),
     SignatureRule(
         rule_id="VW-SIG-018",
-        name="OpenAI / Anthropic API Secret Key",
+        name="OpenAI Standard API Key",
         cwe_id="CWE-798",
         severity="critical",
-        pattern=re.compile(r"\b(sk-(?:proj-|ant-api03-)?[A-Za-z0-9_\-]{32,120})\b"),
+        pattern=re.compile(r"\b(sk-(?!proj-|admin-|ant-api03-)[A-Za-z0-9_\-]{32,120})\b"),
         min_entropy=4.0,
         secret_group=1,
     ),
@@ -309,7 +309,7 @@ SIGNATURE_CATALOG: Tuple[SignatureRule, ...] = (
     ),
     SignatureRule(
         rule_id="VW-SIG-025",
-        name="Discord Bot / Webhook Token",
+        name="Discord Bot / User Token",
         cwe_id="CWE-798",
         severity="high",
         pattern=re.compile(r"\b([MN][A-Za-z\d]{23,25}\.[\w-]{6}\.[\w-]{27,39})\b"),
@@ -318,11 +318,11 @@ SIGNATURE_CATALOG: Tuple[SignatureRule, ...] = (
     ),
     SignatureRule(
         rule_id="VW-SIG-026",
-        name="Telegram Bot API Token",
+        name="Telegram Bot Token",
         cwe_id="CWE-798",
-        severity="high",
-        pattern=re.compile(r"\b(\d{8,10}:AA[A-Za-z0-9_-]{33})\b"),
-        min_entropy=3.8,
+        severity="medium",
+        pattern=re.compile(r"\b([0-9]{9,10}:[a-zA-Z0-9_\-]{35})\b"),
+        min_entropy=0.0,
         secret_group=1,
     ),
     SignatureRule(
@@ -342,6 +342,64 @@ SIGNATURE_CATALOG: Tuple[SignatureRule, ...] = (
         pattern=re.compile(r"AccountKey=([A-Za-z0-9+/]{86}==)"),
         min_entropy=4.3,
         secret_group=1,
+    ),
+    SignatureRule(
+        rule_id="VW-SIG-029",
+        name="Anthropic Claude API Key",
+        cwe_id="CWE-798",
+        severity="high",
+        pattern=re.compile(r"\b(sk-ant-api03-[A-Za-z0-9_\-]{80,110})\b"),
+        min_entropy=0.0,
+        secret_group=1,
+    ),
+    SignatureRule(
+        rule_id="VW-SIG-030",
+        name="OpenAI Project Key",
+        cwe_id="CWE-798",
+        severity="high",
+        pattern=re.compile(r"\b(sk-proj-[A-Za-z0-9_\-]{48,128})\b"),
+        min_entropy=0.0,
+        secret_group=1,
+    ),
+    SignatureRule(
+        rule_id="VW-SIG-031",
+        name="OpenAI Admin Key",
+        cwe_id="CWE-798",
+        severity="high",
+        pattern=re.compile(r"\b(sk-admin-[A-Za-z0-9_\-]{48,128})\b"),
+        min_entropy=0.0,
+        secret_group=1,
+    ),
+    SignatureRule(
+        rule_id="VW-SIG-032",
+        name="HuggingFace Access Token",
+        cwe_id="CWE-798",
+        severity="high",
+        pattern=re.compile(r"\b(hf_[A-Za-z0-9]{34,40})\b"),
+        min_entropy=0.0,
+        secret_group=1,
+    ),
+    SignatureRule(
+        rule_id="VW-SIG-033",
+        name="Discord Webhook URL",
+        cwe_id="CWE-798",
+        severity="medium",
+        pattern=re.compile(
+            r"(https://discord(?:app)?\.com/api/webhooks/[0-9]{17,21}/[A-Za-z0-9_\-]{60,70})"
+        ),
+        min_entropy=0.0,
+        secret_group=1,
+    ),
+    SignatureRule(
+        rule_id="VW-SIG-034",
+        name="GCP Service Account Key",
+        cwe_id="CWE-798",
+        severity="critical",
+        pattern=re.compile(
+            r"""(?:"type"\s*:\s*"service_account"[\s\S]*?"private_key"\s*:\s*"(?:[^\"]*-----[B]EGIN PRIVATE KEY-----)|"private_key"\s*:\s*"(?:[^\"]*-----[B]EGIN PRIVATE KEY-----)[\s\S]*?"type"\s*:\s*"service_account")"""
+        ),
+        min_entropy=0.0,
+        secret_group=0,
     ),
 )
 
@@ -457,4 +515,29 @@ def scan_text_for_secrets(
                 include_entropy=include_entropy,
             )
         )
+
+    # Multi-line detection for GCP Service Account Key spanning multiple JSON lines
+    if not any(f.rule_id == "VW-SIG-034" for f in results):
+        gcp_rule = next((r for r in SIGNATURE_CATALOG if r.rule_id == "VW-SIG-034"), None)
+        if gcp_rule is not None:
+            for match in gcp_rule.pattern.finditer(content):
+                matched_text = match.group(0)
+                line_no = content[: match.start()].count("\n") + 1
+                col = match.start() - content[: match.start()].rfind("\n")
+                results.append(
+                    SecretFinding(
+                        rule_id=gcp_rule.rule_id,
+                        rule_name=gcp_rule.name,
+                        cwe_id=gcp_rule.cwe_id,
+                        severity=gcp_rule.severity,
+                        file_path=file_path,
+                        line_number=line_no,
+                        column=max(1, col),
+                        masked_secret=mask_secret(matched_text),
+                        entropy=calculate_shannon_entropy(matched_text),
+                        commit_hash=commit_hash,
+                        description=f"{gcp_rule.name} detected ({gcp_rule.cwe_id})",
+                    )
+                )
+
     return results
